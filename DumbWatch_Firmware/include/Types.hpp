@@ -5,6 +5,7 @@ namespace types
 {
 
     typedef unsigned long TimeMS_t;
+    typedef const uint8_t Pin_t;
 
 } // types
 

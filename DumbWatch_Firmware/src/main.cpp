@@ -8,16 +8,12 @@
 
 #include "Types.hpp"
 #include "Tasks.hpp"
+#include "InputHandler.hpp"
+#include "BatteryHandler.hpp"
+#include "UI.hpp"
 
-#define BAT_VOLT_PIN 6
-#define BAT_VOLT_PIN_EN 26
-
-#define I2C_DATA 4 // SDA
-#define I2C_CLCK 5 // SCK / SCL
-
-#define BTN_0 0
-#define BTN_1 1
-#define BTN_2 2
+#define I2C_DATA D4 // SDA
+#define I2C_CLCK D5 // SCK / SCL
 
 #define SCREEN_WIDTH 128
 #define SCREEN_HEIGHT 32
@@ -60,95 +56,108 @@ const unsigned char catImg[] PROGMEM = {
     0xff, 0xff, 0xff, 0xe3, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xc3, 0xe3,
     0xff, 0xff, 0xff, 0xc7, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xe0, 0x0f};
 
-Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT);
+Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, -1);
+
+InputHandler<3> inputHandler({D2, D1, D0});
+BatteryHandler batteryHandler;
+
+UI ui(display, batteryHandler);
 
 void setup()
 {
   Serial.begin(115200);
+
   Wire.begin(I2C_DATA, I2C_CLCK);
+  Wire.setClock(100000);
 
-  pinMode(BAT_VOLT_PIN, INPUT);
-  pinMode(BAT_VOLT_PIN_EN, OUTPUT);
-
-  // active low, use internal pull up
-  pinMode(BTN_0, INPUT_PULLUP);
-  pinMode(BTN_1, INPUT_PULLUP);
-  pinMode(BTN_2, INPUT_PULLUP);
-
-  // enable battery measurement circuit
-  digitalWrite(BAT_VOLT_PIN_EN, HIGH);
+  inputHandler.begin();
+  batteryHandler.begin();
 
   delay(1000);
 
-  // if (!display.begin(SSD1306_SWITCHCAPVCC, SCREEN_ADDRESS))
-  // {
-  //   Serial.println(F("SSD1306 not found"));
-  //   while (1)
-  //     ;
-  // }
+  if (!display.begin(SSD1306_SWITCHCAPVCC, SCREEN_ADDRESS, false, false))
+  {
+    Serial.println(F("SSD1306 not found"));
+    while (1)
+      ;
+  }
 
-  // display.clearDisplay();
+  display.clearDisplay();
+
+  display.setTextSize(1);
+  display.setTextColor(SSD1306_WHITE);
+  display.setCursor(0, 0);
+  display.print("DumbWatch Loading...");
+  display.display();
+
+  batteryHandler.UpdateState();
+  ui.MarkDirty();
 }
 
-tasks::ScheduledTask<tasks::BaseTaskData> PrintHello(
-    tasks::BaseTaskData{.interval = 1000},
+tasks::ScheduledTask<tasks::BaseTaskData> InputUpdateTask(
+    tasks::BaseTaskData{.interval = 50},
     [](const types::TimeMS_t currentTime)
     {
-      if (currentTime - PrintHello.data.lastRun >= PrintHello.data.interval)
+      static auto &task = InputUpdateTask;
+      if (currentTime - task.data.lastRun >= task.data.interval)
       {
-        Serial.print(currentTime);
-        Serial.print(" ms   ");
-        Serial.println("Hello!");
-        PrintHello.data.lastRun = millis();
+        inputHandler.UpdateState();
+
+        if (inputHandler.buttons[0].pressed())
+          ui.SetScreen(UI::Screen::HOME);
+        if (inputHandler.buttons[1].pressed())
+          ui.SetScreen(UI::Screen::BATTERY);
+        if (inputHandler.buttons[2].pressed())
+          ui.SetScreen(UI::Screen::SETTINGS);
+
+        task.data.lastRun = millis();
       }
     });
 
-#define BAT_CHECK_ITERATIONS 16.0
-tasks::ScheduledTask<tasks::BaseTaskData> PrintBatteryPercentage(
+tasks::ScheduledTask<tasks::BaseTaskData> BatteryUpdateTask(
     tasks::BaseTaskData{.interval = 5000},
     [](const types::TimeMS_t currentTime)
     {
-      if (currentTime - PrintBatteryPercentage.data.lastRun >= PrintBatteryPercentage.data.interval)
+      static auto &task = BatteryUpdateTask;
+      if (currentTime - task.data.lastRun >= task.data.interval)
       {
-        uint32_t voltageSum = 0;
+        float oldVoltage = batteryHandler.voltage;
+        int oldPercentage = batteryHandler.percentage;
 
-        for (int i = 0; i < BAT_CHECK_ITERATIONS; i++)
-          voltageSum += analogReadMilliVolts(BAT_VOLT_PIN);
+        batteryHandler.UpdateState();
 
-        // https://wiki.seeedstudio.com/check_battery_voltage/
+        if (oldVoltage != batteryHandler.voltage || oldPercentage != batteryHandler.percentage)
+        {
+          ui.MarkDirty();
 
-        // convert ADC reading to voltage
-        // 2 * voltageSum because ADC is connected to a 1:2 voltage divider
-        // voltageSum / [BAT_CHECK_ITERATIONS] to average all [BAT_CHECK_ITERATIONS] measurements
-        // / 1000 to convert from mV to V (ex. 3500mV -> 3.5V)
-        float batteryVoltage = (2.0 * voltageSum / BAT_CHECK_ITERATIONS) / 1000.0;
+          Serial.print("Battery: ");
+          Serial.print(batteryHandler.voltage, 2);
+          Serial.print("V ");
+          Serial.print(batteryHandler.percentage);
+          Serial.println("%");
+        }
 
-        // LiPo percentage estimate
-        // batteryVoltage - 3.20 moves the zero point to 3.20V we want distance from empty (empty:3.2V)
-        // (4.20 - 3.20) total usable voltage range
-        // (batteryVoltage - 3.20) / (4.20 - 3.20) converts the distance from empty into a decimal
-        // * 100 to convert decimal to percentage
-        int batteryPercent = (batteryVoltage - 3.20) / (4.20 - 3.20) * 100;
-        batteryPercent = constrain(batteryPercent, 0, 100);
-
-        Serial.print(currentTime);
-        Serial.print(" ms   ");
-
-        Serial.print("Battery Voltage: ");
-        Serial.print(batteryVoltage, 3); // print 3 decimal places
-        Serial.print(" V   ");
-
-        Serial.print("Battery: ");
-        Serial.print(batteryPercent);
-        Serial.println("%");
-
-        PrintBatteryPercentage.data.lastRun = millis();
+        task.data.lastRun = millis();
       }
     });
 
-std::vector<tasks::ScheduledTaskInterface *> schedule = {
-    &PrintHello,
-    &PrintBatteryPercentage,
+tasks::ScheduledTask<tasks::BaseTaskData> UIRenderTask(
+    tasks::BaseTaskData{.interval = 16},
+    [](const types::TimeMS_t currentTime)
+    {
+      static auto &task = UIRenderTask;
+      if (currentTime - task.data.lastRun >= task.data.interval)
+      {
+        ui.Render();
+        task.data.lastRun = millis();
+      }
+    });
+
+const size_t SCHEDULE_LEN = 3;
+std::array<tasks::ScheduledTaskInterface *, SCHEDULE_LEN> schedule = {
+    &InputUpdateTask,
+    &BatteryUpdateTask,
+    &UIRenderTask,
 };
 
 void loop()
@@ -160,5 +169,5 @@ void loop()
     currentTime = millis();
   }
 
-  delay(100);
+  delay(10);
 }

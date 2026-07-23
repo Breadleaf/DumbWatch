@@ -18,6 +18,7 @@ namespace tasks
     struct ScheduledTaskInterface
     {
         virtual void run(const types::TimeMS_t) = 0;
+        virtual ~ScheduledTaskInterface() = default;
     };
 
     template <class T>
